@@ -13,11 +13,30 @@ const PORT = process.env.PORT || 3000;
 // Middleware
 app.use(express.json());
 app.use(express.static('public'));
+app.use(express.static(__dirname)); // Kok dizini de statik dosyalar icin kullan
 
-// Admin Panel Routes (Fallback for root deployment)
-app.get('/admin.html', (req, res) => res.sendFile(path.join(__dirname, 'public/admin.html')));
-app.get('/admin.css', (req, res) => res.sendFile(path.join(__dirname, 'public/admin.css')));
-app.get('/admin.js', (req, res) => res.sendFile(path.join(__dirname, 'public/admin.js')));
+// Admin Panel Routes (Fallback system)
+app.get('/admin.html', (req, res) => {
+    // Once public icinde ara, yoksa kok dizinde ara
+    const publicPath = path.join(__dirname, 'public', 'admin.html');
+    const rootPath = path.join(__dirname, 'admin.html');
+
+    res.sendFile(publicPath, (err) => {
+        if (err) res.sendFile(rootPath);
+    });
+});
+
+app.get('/admin.css', (req, res) => {
+    const publicPath = path.join(__dirname, 'public', 'admin.css');
+    const rootPath = path.join(__dirname, 'admin.css');
+    res.sendFile(publicPath, (err) => { if (err) res.sendFile(rootPath); });
+});
+
+app.get('/admin.js', (req, res) => {
+    const publicPath = path.join(__dirname, 'public', 'admin.js');
+    const rootPath = path.join(__dirname, 'admin.js');
+    res.sendFile(publicPath, (err) => { if (err) res.sendFile(rootPath); });
+});
 
 // Rate Limiting
 const limiter = rateLimit({
