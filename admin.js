@@ -1,241 +1,132 @@
-// Global state
-let authCredentials = null;
+const API_URL = '';
 let allKeys = [];
 
-// API Base URL
-const API_BASE = window.location.origin;
-
-// Helper function to make authenticated API calls
-async function apiCall(endpoint, options = {}) {
-    if (authCredentials) {
-        options.headers = {
-            ...options.headers,
-            'Authorization': `Basic ${btoa(`${authCredentials.username}:${authCredentials.password}`)}`,
-            'Content-Type': 'application/json'
-        };
-    }
-
-    const response = await fetch(`${API_BASE}${endpoint}`, options);
-
-    if (response.status === 401) {
-        logout();
-        throw new Error('Authentication failed');
-    }
-
-    return response.json();
-}
-
-// Login functionality
+// Auth Logic
 document.getElementById('loginForm').addEventListener('submit', async (e) => {
     e.preventDefault();
+    const user = document.getElementById('username').value;
+    const pass = document.getElementById('password').value;
 
-    const username = document.getElementById('username').value;
-    const password = document.getElementById('password').value;
-    const errorDiv = document.getElementById('loginError');
-
-    authCredentials = { username, password };
+    // Store credentials in memory for session
+    const credentials = btoa(`${user}:${pass}`);
+    sessionStorage.setItem('auth', credentials);
 
     try {
-        // Test authentication
-        await apiCall('/api/admin/test');
+        const res = await fetch(`${API_URL}/api/admin/keys`, {
+            headers: { 'Authorization': `Basic ${credentials}` }
+        });
 
-        // Login successful
-        document.getElementById('loginSection').style.display = 'none';
-        document.getElementById('mainPanel').style.display = 'block';
+        if (res.ok) {
+            document.getElementById('loginOverlay').style.display = 'none';
+            document.getElementById('dashboard').style.display = 'block';
+            loadKeys();
+        } else {
+            alert('Invalid credentials!');
+        }
+    } catch (err) {
+        alert('Server validation failed');
+    }
+});
 
-        // Load initial data
-        loadStats();
-        loadKeys();
+// Load Keys
+async function loadKeys() {
+    const auth = sessionStorage.getItem('auth');
+    try {
+        const res = await fetch(`${API_URL}/api/admin/keys`, {
+            headers: { 'Authorization': `Basic ${auth}` }
+        });
+        const data = await res.json();
+        allKeys = data.keys || [];
+        updateStats();
+        renderKeys(allKeys);
+    } catch (err) {
+        console.error('Error loading keys:', err);
+    }
+}
 
-    } catch (error) {
-        errorDiv.textContent = 'Invalid credentials';
-        errorDiv.classList.add('show');
-        authCredentials = null;
+function updateStats() {
+    document.getElementById('totalKeys').textContent = allKeys.length;
+    const used = allKeys.filter(k => k.is_used).length;
+    document.getElementById('activeKeys').textContent = used;
+
+    // Only check expiry if date exists
+    const expired = allKeys.filter(k => k.expiry_date && new Date(k.expiry_date) < new Date()).length;
+    document.getElementById('expiredKeys').textContent = expired;
+}
+
+function renderKeys(keys) {
+    const tbody = document.getElementById('keysTableBody');
+    tbody.innerHTML = '';
+
+    keys.forEach(key => {
+        const tr = document.createElement('tr');
+
+        // Status determination
+        let statusClass = 'status-unused';
+        let statusText = 'UNUSED';
+
+        if (key.is_used) {
+            statusClass = 'status-active';
+            statusText = 'ACTIVE';
+        }
+
+        if (key.expiry_date && new Date(key.expiry_date) < new Date()) {
+            statusClass = 'status-expired';
+            statusText = 'EXPIRED';
+        }
+
+        tr.innerHTML = `
+            <td>
+                <code>${key.code}</code>
+                <button class="copy-btn" onclick="navigator.clipboard.writeText('${key.code}')">📋</button>
+            </td>
+            <td><span class="status-indicator ${statusClass}">${statusText}</span></td>
+            <td>${key.hwid ? key.hwid.substring(0, 15) + '...' : '-'}</td>
+            <td>${key.expiry_date ? new Date(key.expiry_date).toLocaleDateString() : 'Lifetime'}</td>
+            <td>${new Date(key.created_at).toLocaleDateString()}</td>
+            <td>
+                <button class="copy-btn" style="color: #ef4444;">Delete</button>
+            </td>
+        `;
+        tbody.appendChild(tr);
+    });
+}
+
+// Generate Key
+document.getElementById('generateBtn').addEventListener('click', async () => {
+    const auth = sessionStorage.getItem('auth');
+    const days = prompt("Enter duration in days (default 30):", "30");
+    if (days === null) return;
+
+    try {
+        const res = await fetch(`${API_URL}/api/admin/generate`, {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json',
+                'Authorization': `Basic ${auth}`
+            },
+            body: JSON.stringify({ durationDays: parseInt(days) })
+        });
+
+        const data = await res.json();
+        if (data.key) {
+            alert(`Key Generated:\n${data.key}`);
+            loadKeys();
+        }
+    } catch (err) {
+        alert('Failed to generate key');
     }
 });
 
 // Logout
-function logout() {
-    authCredentials = null;
-    document.getElementById('loginSection').style.display = 'flex';
-    document.getElementById('mainPanel').style.display = 'none';
-    document.getElementById('username').value = '';
-    document.getElementById('password').value = '';
-}
-
-// Load statistics
-async function loadStats() {
-    try {
-        const stats = await apiCall('/api/admin/stats');
-
-        document.getElementById('totalKeys').textContent = stats.total || 0;
-        document.getElementById('activeKeys').textContent = stats.active || 0;
-        document.getElementById('expiredKeys').textContent = stats.expired || 0;
-        document.getElementById('boundKeys').textContent = stats.bound || 0;
-    } catch (error) {
-        console.error('Error loading stats:', error);
-    }
-}
-
-// Load all keys
-async function loadKeys() {
-    try {
-        allKeys = await apiCall('/api/admin/keys');
-        renderKeys(allKeys);
-    } catch (error) {
-        console.error('Error loading keys:', error);
-        document.getElementById('keysTableBody').innerHTML = `
-            <tr><td colspan="7" class="loading">Error loading keys</td></tr>
-        `;
-    }
-}
-
-// Render keys table
-function renderKeys(keys) {
-    const tbody = document.getElementById('keysTableBody');
-
-    if (keys.length === 0) {
-        tbody.innerHTML = `
-            <tr><td colspan="7" class="loading">No keys found</td></tr>
-        `;
-        return;
-    }
-
-    tbody.innerHTML = keys.map(key => {
-        const createdDate = new Date(key.created_at).toLocaleString();
-        const expiresDate = key.expires_at ? new Date(key.expires_at).toLocaleString() : 'Never';
-        const lastUsed = key.last_used ? new Date(key.last_used).toLocaleString() : 'Never';
-        const isExpired = key.expires_at && new Date(key.expires_at) < new Date();
-        const status = isExpired ? 'Expired' : (key.is_active ? 'Active' : 'Inactive');
-        const statusClass = isExpired ? 'status-expired' : 'status-active';
-        const hwidDisplay = key.hwid || '<span class="status-unbound">Not Bound</span>';
-
-        return `
-            <tr>
-                <td><code>${key.key}</code></td>
-                <td>${hwidDisplay}</td>
-                <td>${createdDate}</td>
-                <td>${expiresDate}</td>
-                <td>${lastUsed}</td>
-                <td class="${statusClass}">${status}</td>
-                <td>
-                    <button class="btn btn-danger" onclick="deleteKey('${key.key}')">🗑️ Delete</button>
-                </td>
-            </tr>
-        `;
-    }).join('');
-}
-
-// Generate new key
-document.getElementById('generateBtn').addEventListener('click', async () => {
-    const expiryDays = parseInt(document.getElementById('expiryDays').value);
-    const btn = document.getElementById('generateBtn');
-
-    btn.disabled = true;
-    btn.textContent = '⏳ Generating...';
-
-    try {
-        const result = await apiCall('/api/admin/generate', {
-            method: 'POST',
-            body: JSON.stringify({ expiryDays })
-        });
-
-        // Display generated key
-        document.getElementById('keyValue').value = result.key;
-        document.getElementById('generatedKey').style.display = 'block';
-
-        const expiryText = expiryDays > 0
-            ? `Expires: ${new Date(result.expiresAt).toLocaleString()}`
-            : 'Lifetime License (No Expiry)';
-        document.getElementById('keyInfo').textContent = expiryText;
-
-        // Reload data
-        loadStats();
-        loadKeys();
-
-    } catch (error) {
-        alert('Error generating key: ' + error.message);
-    } finally {
-        btn.disabled = false;
-        btn.textContent = '🔑 Generate Key';
-    }
+document.getElementById('logoutBtn').addEventListener('click', () => {
+    sessionStorage.removeItem('auth');
+    location.reload();
 });
 
-// Copy key to clipboard
-document.getElementById('copyBtn').addEventListener('click', () => {
-    const keyInput = document.getElementById('keyValue');
-    keyInput.select();
-    document.execCommand('copy');
-
-    const btn = document.getElementById('copyBtn');
-    const originalText = btn.textContent;
-    btn.textContent = '✅ Copied!';
-    setTimeout(() => {
-        btn.textContent = originalText;
-    }, 2000);
-});
-
-// Delete key
-async function deleteKey(key) {
-    if (!confirm(`Are you sure you want to delete key: ${key}?`)) {
-        return;
-    }
-
-    try {
-        await apiCall(`/api/admin/keys/${key}`, {
-            method: 'DELETE'
-        });
-
-        // Reload data
-        loadStats();
-        loadKeys();
-
-    } catch (error) {
-        alert('Error deleting key: ' + error.message);
-    }
-}
-
-// Refresh button
-document.getElementById('refreshBtn').addEventListener('click', () => {
-    loadStats();
-    loadKeys();
-});
-
-// Search functionality
+// Search
 document.getElementById('searchInput').addEventListener('input', (e) => {
-    const searchTerm = e.target.value.toLowerCase();
-
-    if (searchTerm === '') {
-        renderKeys(allKeys);
-    } else {
-        const filtered = allKeys.filter(key =>
-            key.key.toLowerCase().includes(searchTerm) ||
-            (key.hwid && key.hwid.toLowerCase().includes(searchTerm))
-        );
-        renderKeys(filtered);
-    }
+    const term = e.target.value.toLowerCase();
+    const filtered = allKeys.filter(k => k.code.toLowerCase().includes(term));
+    renderKeys(filtered);
 });
-
-// Check server status on load
-async function checkServerStatus() {
-    try {
-        const response = await fetch(`${API_BASE}/api/health`);
-        const data = await response.json();
-
-        if (data.status === 'online') {
-            document.getElementById('serverStatus').innerHTML = `
-                <span class="status-dot"></span>
-                Server Online
-            `;
-        }
-    } catch (error) {
-        document.getElementById('serverStatus').innerHTML = `
-            <span class="status-dot" style="background: red;"></span>
-            Server Offline
-        `;
-    }
-}
-
-// Initialize
-checkServerStatus();
-setInterval(checkServerStatus, 30000); // Check every 30 seconds
