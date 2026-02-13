@@ -13,6 +13,11 @@ app.use(cors());
 app.use(express.json());
 app.use(express.static('public'));
 
+// GitHub'a yanlıslikla ana dizine yuklenen dosyalar icin kurtarici:
+app.get('/admin.html', (req, res) => res.sendFile(path.join(__dirname, 'admin.html')));
+app.get('/admin.css', (req, res) => res.sendFile(path.join(__dirname, 'admin.css')));
+app.get('/admin.js', (req, res) => res.sendFile(path.join(__dirname, 'admin.js')));
+
 // Rate limiting for validation endpoint
 const validationLimiter = rateLimit({
     windowMs: 15 * 60 * 1000, // 15 minutes
