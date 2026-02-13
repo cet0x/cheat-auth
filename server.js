@@ -1,164 +1,131 @@
-require('dotenv').config();
 const express = require('express');
-const cors = require('cors');
-const rateLimit = require('express-rate-limit');
+const sqlite3 = require('sqlite3').verbose();
 const path = require('path');
-const db = require('./database');
+const rateLimit = require('express-rate-limit');
+const dotenv = require('dotenv');
+
+// Load environment variables
+dotenv.config();
 
 const app = express();
 const PORT = process.env.PORT || 3000;
 
 // Middleware
-app.use(cors());
 app.use(express.json());
 app.use(express.static('public'));
 
-// GitHub'a yanlıslikla ana dizine yuklenen dosyalar icin kurtarici:
-app.get('/admin.html', (req, res) => res.sendFile(path.join(__dirname, 'admin.html')));
-app.get('/admin.css', (req, res) => res.sendFile(path.join(__dirname, 'admin.css')));
-app.get('/admin.js', (req, res) => res.sendFile(path.join(__dirname, 'admin.js')));
+// Admin Panel Routes (Fallback for root deployment)
+app.get('/admin.html', (req, res) => res.sendFile(path.join(__dirname, 'public/admin.html')));
+app.get('/admin.css', (req, res) => res.sendFile(path.join(__dirname, 'public/admin.css')));
+app.get('/admin.js', (req, res) => res.sendFile(path.join(__dirname, 'public/admin.js')));
 
-// Rate limiting for validation endpoint
-const validationLimiter = rateLimit({
+// Rate Limiting
+const limiter = rateLimit({
     windowMs: 15 * 60 * 1000, // 15 minutes
-    max: 100, // limit each IP to 100 requests per windowMs
-    message: 'Too many validation requests, please try again later'
+    max: 100 // limit each IP to 100 requests per windowMs
+});
+app.use(limiter);
+
+// Database Setup
+const dbPath = process.env.DB_PATH || './database.db';
+const db = new sqlite3.Database(dbPath, (err) => {
+    if (err) {
+        console.error('Error opening database', err.message);
+    } else {
+        console.log('Connected to the SQLite database.');
+        db.run(`CREATE TABLE IF NOT EXISTS licenses (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            code TEXT UNIQUE,
+            hwid TEXT,
+            is_used BOOLEAN DEFAULT 0,
+            expiry_date TEXT,
+            created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+        )`);
+
+        // Add specific admin user table if needed, for now using env vars
+    }
 });
 
-// Rate limiting for admin endpoints
-const adminLimiter = rateLimit({
-    windowMs: 15 * 60 * 1000,
-    max: 50,
-    message: 'Too many admin requests, please try again later'
-});
-
-// Simple admin authentication middleware
-const adminAuth = (req, res, next) => {
+// Admin Authentication Middleware
+const authenticateAdmin = (req, res, next) => {
     const authHeader = req.headers.authorization;
-
-    if (!authHeader || !authHeader.startsWith('Basic ')) {
-        return res.status(401).json({ error: 'Authentication required' });
+    if (!authHeader) {
+        return res.status(401).json({ error: 'Unauthorized' });
     }
 
-    const base64Credentials = authHeader.split(' ')[1];
-    const credentials = Buffer.from(base64Credentials, 'base64').toString('ascii');
-    const [username, password] = credentials.split(':');
+    const auth = new Buffer.from(authHeader.split(' ')[1], 'base64').toString().split(':');
+    const user = auth[0];
+    const pass = auth[1];
 
-    if (username === process.env.ADMIN_USERNAME && password === process.env.ADMIN_PASSWORD) {
+    if (user === process.env.ADMIN_USERNAME && pass === process.env.ADMIN_PASSWORD) {
         next();
     } else {
-        res.status(401).json({ error: 'Invalid credentials' });
+        res.status(401).json({ error: 'Unauthorized' });
     }
 };
 
-// ==================== PUBLIC ENDPOINTS ====================
+// API Routes
+app.post('/api/validate', (req, res) => {
+    const { key, hwid } = req.body;
 
-// Health check
-app.get('/api/health', (req, res) => {
-    res.json({ status: 'online', timestamp: new Date().toISOString() });
-});
+    if (!key || !hwid) {
+        return res.status(400).json({ valid: false, message: 'Missing key or HWID' });
+    }
 
-// Validate license key
-app.post('/api/validate', validationLimiter, async (req, res) => {
-    try {
-        const { key, hwid } = req.body;
-
-        if (!key || !hwid) {
-            return res.status(400).json({
-                valid: false,
-                message: 'Key and HWID are required'
-            });
+    db.get('SELECT * FROM licenses WHERE code = ?', [key], (err, row) => {
+        if (err) {
+            return res.status(500).json({ valid: false, message: 'Database error' });
+        }
+        if (!row) {
+            return res.status(200).json({ valid: false, message: 'Invalid key' });
         }
 
-        const result = await db.validateKey(key, hwid);
-        res.json(result);
-    } catch (error) {
-        console.error('Validation error:', error);
-        res.status(500).json({
-            valid: false,
-            message: 'Server error during validation'
-        });
-    }
+        // Check HWID binding
+        if (row.is_used && row.hwid !== hwid) {
+            return res.status(200).json({ valid: false, message: 'Key already used on another machine' });
+        }
+
+        // Check Expiry
+        if (row.expiry_date && new Date(row.expiry_date) < new Date()) {
+            return res.status(200).json({ valid: false, message: 'Key expired' });
+        }
+
+        // Bind HWID if new
+        if (!row.is_used) {
+            db.run('UPDATE licenses SET is_used = 1, hwid = ? WHERE id = ?', [hwid, row.id]);
+        }
+
+        res.json({ valid: true, message: 'Success', expiry: row.expiry_date });
+    });
 });
 
-// ==================== ADMIN ENDPOINTS ====================
-
-// Generate new license key
-app.post('/api/admin/generate', adminAuth, adminLimiter, async (req, res) => {
-    try {
-        const { expiryDays } = req.body;
-        const days = parseInt(expiryDays) || 30;
-
-        const result = await db.createKey(days);
-        res.json(result);
-    } catch (error) {
-        console.error('Key generation error:', error);
-        res.status(500).json({ error: 'Failed to generate key' });
-    }
+// Admin API
+app.get('/api/admin/keys', authenticateAdmin, (req, res) => {
+    db.all('SELECT * FROM licenses ORDER BY created_at DESC', [], (err, rows) => {
+        if (err) {
+            res.status(500).json({ error: err.message });
+            return;
+        }
+        res.json({ keys: rows });
+    });
 });
 
-// Get all license keys
-app.get('/api/admin/keys', adminAuth, adminLimiter, async (req, res) => {
-    try {
-        const keys = await db.getAllKeys();
-        res.json(keys);
-    } catch (error) {
-        console.error('Error fetching keys:', error);
-        res.status(500).json({ error: 'Failed to fetch keys' });
-    }
-});
+app.post('/api/admin/generate', authenticateAdmin, (req, res) => {
+    const { durationDays, count } = req.body;
+    const expiryDate = new Date();
+    expiryDate.setDate(expiryDate.getDate() + (durationDays || 30));
 
-// Delete a license key
-app.delete('/api/admin/keys/:key', adminAuth, adminLimiter, async (req, res) => {
-    try {
-        const { key } = req.params;
-        const result = await db.deleteKey(key);
-        res.json(result);
-    } catch (error) {
-        console.error('Error deleting key:', error);
-        res.status(500).json({ error: 'Failed to delete key' });
-    }
-});
+    // Generate simple random key
+    const key = 'CS2-' + Math.random().toString(36).substr(2, 9).toUpperCase();
 
-// Get statistics
-app.get('/api/admin/stats', adminAuth, adminLimiter, async (req, res) => {
-    try {
-        const stats = await db.getStats();
-        res.json(stats);
-    } catch (error) {
-        console.error('Error fetching stats:', error);
-        res.status(500).json({ error: 'Failed to fetch statistics' });
-    }
+    db.run('INSERT INTO licenses (code, expiry_date) VALUES (?, ?)', [key, expiryDate.toISOString()], function (err) {
+        if (err) {
+            return res.status(500).json({ error: err.message });
+        }
+        res.json({ key: key, id: this.lastID });
+    });
 });
-
-// Test admin authentication
-app.get('/api/admin/test', adminAuth, (req, res) => {
-    res.json({ authenticated: true, message: 'Admin access granted' });
-});
-
-// ==================== START SERVER ====================
 
 app.listen(PORT, () => {
-    console.log(`
-╔═══════════════════════════════════════════════════════╗
-║         CS2 License Server - Online & Ready          ║
-╚═══════════════════════════════════════════════════════╝
-
-🚀 Server running on: http://localhost:${PORT}
-🔐 Admin Panel: http://localhost:${PORT}/admin.html
-📊 API Health: http://localhost:${PORT}/api/health
-
-Admin Credentials:
-  Username: ${process.env.ADMIN_USERNAME}
-  Password: ${process.env.ADMIN_PASSWORD}
-
-⚠️  IMPORTANT: Change admin password in .env file!
-    `);
-});
-
-// Graceful shutdown
-process.on('SIGINT', () => {
-    console.log('\n🛑 Shutting down server...');
-    db.close();
-    process.exit(0);
+    console.log(`Server running on port ${PORT}`);
 });
